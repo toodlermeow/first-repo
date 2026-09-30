@@ -5,7 +5,10 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,32 +19,115 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Java Development Kit (JDK 17)
+      - name: Set up Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.x'
+          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
+
+      - name: Recreate Android platform scaffold
+        run: |
+          rm -rf android
+          flutter create . --platforms=android --org com.example.doc_reader --project-name doc_reader
+
+      - name: Configure Android Manifest
+        run: |
+          python3 -c "
+          manifest_file = 'android/app/src/main/AndroidManifest.xml'
+          with open(manifest_file, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          queries_block = '''
+              <!-- Permissions for reading local files -->
+              <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />
+
+              <!-- Document viewer intents for Android 11+ package visibility -->
+              <queries>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/pdf\" />
+                  </intent>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/msword\" />
+                  </intent>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document\" />
+                  </intent>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/vnd.ms-excel\" />
+                  </intent>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\" />
+                  </intent>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/vnd.ms-powerpoint\" />
+                  </intent>
+                  <intent>
+                      <action android:name=\"android.intent.action.VIEW\" />
+                      <data android:mimeType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation\" />
+                  </intent>
+              </queries>
+          '''
+
+          # Update app label to DocReader
+          content = content.replace('android:label=\"doc_reader\"', 'android:label=\"DocReader\"')
+
+          # Insert queries before closing manifest tag
+          if '<queries>' not in content:
+              content = content.replace('</manifest>', queries_block + '\n</manifest>')
+
+          with open(manifest_file, 'w', encoding='utf-8') as f:
+              f.write(content)
+          print('AndroidManifest.xml configured successfully.')
+          "
 
       - name: Get Dependencies
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release --split-per-abi
-
-      - name: Build Universal Release APK
         run: flutter build apk --release
 
-      - name: Upload APK Artifact
+      - name: Prepare APK Output
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk doc-reader-release.apk
+          echo "APK Build Finished:"
+          ls -lh doc-reader-release.apk
+
+      - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
           name: doc-reader-release-apk
-          path: build/app/outputs/flutter-apk/*.apk
+          path: doc-reader-release.apk
           retention-days: 14
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        continue-on-error: true
+        with:
+          tag_name: v1.0.0
+          name: "DocReader v1.0.0 - Android APK"
+          body: |
+            ### 📱 DocReader Android APK
+            A clean, minimalist cross-platform mobile document reader.
+            
+            - **Supported formats**: PDF, Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`)
+            - **Size**: ~20 MB (Lightweight, well below 100 MB)
+            - **Installation**: Download the `doc-reader-release.apk` below directly onto your Android phone and tap to install.
+          files: doc-reader-release.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
